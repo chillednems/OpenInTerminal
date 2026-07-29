@@ -28,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         DefaultsManager.shared.firstSetup()
+        LaunchAtLoginManager.reconcileSavedPreference()
         addObserver()
         terminateOpenInTerminalHelper()
         setStatusItemIcon()
