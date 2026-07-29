@@ -7,19 +7,147 @@
 //
 
 import Foundation
+import Security
 
-/// group defaults
-let GroupDefaults = UserDefaults(suiteName: Constants.Id.Group)
+private let defaultsMigrationVersionKey = "OIT_DefaultsMigrationVersion"
+private let currentDefaultsMigrationVersion = 1
+private let legacyPreferenceKeys = [
+    "FirstSetup",
+    "LaunchAtLogin",
+    "QuickToggle",
+    "QuickToggleType",
+    "HideStatusItem",
+    "HideContextMenuItems",
+    "ContextMenuUseSubmenu",
+    "DefaultTerminal",
+    "DefaultEditor",
+    "TerminalNewOption",
+    "ITermNewOption",
+    "CustomMenuOptions",
+    "CustomMenuApplyToToolbar",
+    "CustomMenuApplyToContext",
+    "CustomMenuIconOption",
+    "PathEscapeOption",
+    "KittyCommand",
+    "OnlyActivateShortcutsInFinder",
+    "NeovimCommand",
+    "GitkrakenCommand",
+    "OIT_DefaultTerminalShortcut",
+    "OIT_DefaultEditorShortcut",
+    "OIT_CopyPathShortcut"
+]
+
+private struct DefaultsConfiguration {
+    let store: UserDefaults
+    let persistentDomainName: String?
+}
 
 /// current defaults
-public var Defaults: UserDefaults = {
-    if Bundle.main.bundleIdentifier == Constants.Id.OpenInTerminalLite ||
-        Bundle.main.bundleIdentifier == Constants.Id.OpenInEditorLite {
-        return UserDefaults.standard
-    } else {
-        return GroupDefaults ?? UserDefaults.standard
+///
+/// Signed upstream builds use a macOS-style App Group whose prefix matches the
+/// signing team. Ad-hoc and differently signed builds cannot access that group,
+/// so they use their standard defaults domain rather than silently writing to an
+/// invalid suite that cfprefsd will not persist.
+private let defaultsConfiguration: DefaultsConfiguration = {
+    let bundleIdentifier = Bundle.main.bundleIdentifier
+    if bundleIdentifier == Constants.Id.OpenInTerminalLite ||
+        bundleIdentifier == Constants.Id.OpenInEditorLite {
+        return DefaultsConfiguration(store: .standard,
+                                     persistentDomainName: bundleIdentifier)
     }
+
+    if currentSigningTeamIdentifier() == Constants.Id.Group.split(separator: ".").first.map(String.init),
+       canAccessAppGroupContainer(Constants.Id.Group),
+       let groupDefaults = UserDefaults(suiteName: Constants.Id.Group) {
+        migrateLegacyDefaultsIfNeeded(to: groupDefaults)
+        return DefaultsConfiguration(store: groupDefaults,
+                                     persistentDomainName: Constants.Id.Group)
+    }
+
+    let standardDefaults = UserDefaults.standard
+    migrateLegacyDefaultsIfNeeded(to: standardDefaults)
+    return DefaultsConfiguration(store: standardDefaults,
+                                 persistentDomainName: bundleIdentifier)
 }()
+
+public var Defaults: UserDefaults = defaultsConfiguration.store
+
+private func currentSigningTeamIdentifier() -> String? {
+    var dynamicCode: SecCode?
+    guard SecCodeCopySelf([], &dynamicCode) == errSecSuccess,
+          let dynamicCode else {
+        return nil
+    }
+
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(dynamicCode, [], &staticCode) == errSecSuccess,
+          let staticCode else {
+        return nil
+    }
+
+    var signingInformation: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode,
+                                        SecCSFlags(rawValue: kSecCSSigningInformation),
+                                        &signingInformation) == errSecSuccess,
+          let information = signingInformation as? [CFString: Any] else {
+        return nil
+    }
+
+    return information[kSecCodeInfoTeamIdentifier] as? String
+}
+
+/// On macOS, `containerURL` can return an expected-looking URL even when the
+/// process is not authorized for the group. Test the directory itself before
+/// selecting the corresponding UserDefaults suite.
+private func canAccessAppGroupContainer(_ identifier: String) -> Bool {
+    guard let containerURL = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: identifier) else {
+        return false
+    }
+
+    let probeURL = containerURL
+        .appendingPathComponent(".OpenInTerminal-access-\(UUID().uuidString)")
+    do {
+        try FileManager.default.createDirectory(at: containerURL,
+                                                withIntermediateDirectories: true)
+        try Data().write(to: probeURL, options: .atomic)
+        try FileManager.default.removeItem(at: probeURL)
+        return true
+    } catch {
+        try? FileManager.default.removeItem(at: probeURL)
+        return false
+    }
+}
+
+private func migrateLegacyDefaultsIfNeeded(to destination: UserDefaults) {
+    guard destination.integer(forKey: defaultsMigrationVersionKey) <
+            currentDefaultsMigrationVersion else {
+        return
+    }
+
+    if let legacyDefaults = UserDefaults(suiteName: Constants.Id.LegacyGroup) {
+        for key in legacyPreferenceKeys where destination.object(forKey: key) == nil {
+            if let value = legacyDefaults.object(forKey: key) {
+                destination.set(value, forKey: key)
+            }
+        }
+    }
+
+    destination.set(currentDefaultsMigrationVersion,
+                    forKey: defaultsMigrationVersionKey)
+    destination.synchronize()
+}
+
+func removeAllDefaults() {
+    if let domainName = defaultsConfiguration.persistentDomainName {
+        Defaults.removePersistentDomain(forName: domainName)
+    }
+    UserDefaults(suiteName: Constants.Id.LegacyGroup)?
+        .removePersistentDomain(forName: Constants.Id.LegacyGroup)
+    Defaults.set(currentDefaultsMigrationVersion,
+                 forKey: defaultsMigrationVersionKey)
+    Defaults.synchronize()
+}
 
 public class DefaultsKeys {
     fileprivate init() {}
