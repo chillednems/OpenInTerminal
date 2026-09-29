@@ -15,7 +15,9 @@ struct Constants {
         /// macOS-style App Group identifiers are authorized by matching their
         /// prefix to the signing team's identifier and do not require an
         /// embedded provisioning profile.
-        static let Group = "C8VX3ZLX5U.wang.jianing.app.OpenInTerminal"
+        static let Group = "C8VX3ZLX5U.group.wang.jianing.app.OpenInTerminal"
+        static let PreviousGroup = "C8VX3ZLX5U.wang.jianing.app.OpenInTerminal"
+        static let MainApp = "wang.jianing.app.OpenInTerminal"
         static let LegacyGroup = "group.wang.jianing.app.OpenInTerminal"
         static let OpenInTerminalLite = "wang.jianing.app.OpenInTerminal-Lite"
         static let OpenInEditorLite = "wang.jianing.app.OpenInEditor-Lite"

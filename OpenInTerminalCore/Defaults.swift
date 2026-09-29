@@ -10,7 +10,7 @@ import Foundation
 import Security
 
 private let defaultsMigrationVersionKey = "OIT_DefaultsMigrationVersion"
-private let currentDefaultsMigrationVersion = 1
+private let currentDefaultsMigrationVersion = 2
 private let legacyPreferenceKeys = [
     "FirstSetup",
     "LaunchAtLogin",
@@ -59,13 +59,14 @@ private let defaultsConfiguration: DefaultsConfiguration = {
     if currentSigningTeamIdentifier() == Constants.Id.Group.split(separator: ".").first.map(String.init),
        canAccessAppGroupContainer(Constants.Id.Group),
        let groupDefaults = UserDefaults(suiteName: Constants.Id.Group) {
-        migrateLegacyDefaultsIfNeeded(to: groupDefaults)
+        migrateLegacyDefaultsIfNeeded(to: groupDefaults, domainName: Constants.Id.Group)
         return DefaultsConfiguration(store: groupDefaults,
                                      persistentDomainName: Constants.Id.Group)
     }
 
     let standardDefaults = UserDefaults.standard
-    migrateLegacyDefaultsIfNeeded(to: standardDefaults)
+    migrateLegacyDefaultsIfNeeded(to: standardDefaults,
+                                  domainName: bundleIdentifier ?? "")
     return DefaultsConfiguration(store: standardDefaults,
                                  persistentDomainName: bundleIdentifier)
 }()
@@ -119,16 +120,38 @@ private func canAccessAppGroupContainer(_ identifier: String) -> Bool {
     }
 }
 
-private func migrateLegacyDefaultsIfNeeded(to destination: UserDefaults) {
-    guard destination.integer(forKey: defaultsMigrationVersionKey) <
+// Source order is deliberate: recover recent host fallback preferences first,
+// then the previous Team-prefixed store, then the original legacy suite.
+private let migrationSourceDomains = [Constants.Id.MainApp,
+                                      Constants.Id.PreviousGroup,
+                                      Constants.Id.LegacyGroup]
+
+private func migrateLegacyDefaultsIfNeeded(
+    to destination: UserDefaults,
+    domainName: String,
+    processIdentifier: String? = Bundle.main.bundleIdentifier,
+    sourceDomains: [String] = migrationSourceDomains
+) {
+    // The sandboxed extension may start first and cannot reliably read legacy
+    // preferences. Only the host may copy values or record completion.
+    guard processIdentifier == Constants.Id.MainApp,
+          destination.integer(forKey: defaultsMigrationVersionKey) <
             currentDefaultsMigrationVersion else {
         return
     }
 
-    if let legacyDefaults = UserDefaults(suiteName: Constants.Id.LegacyGroup) {
-        for key in legacyPreferenceKeys where destination.object(forKey: key) == nil {
-            if let value = legacyDefaults.object(forKey: key) {
+    // Inspect persistent domains, not registered defaults or suite search lists.
+    // Existing destination values always win, including false and empty values.
+    var values = destination.persistentDomain(forName: domainName) ?? [:]
+    for sourceName in sourceDomains where sourceName != domainName {
+        guard let source = UserDefaults(suiteName: sourceName),
+              let sourceValues = source.persistentDomain(forName: sourceName) else {
+            continue
+        }
+        for key in legacyPreferenceKeys where values[key] == nil {
+            if let value = sourceValues[key] {
                 destination.set(value, forKey: key)
+                values[key] = value
             }
         }
     }
@@ -138,15 +161,30 @@ private func migrateLegacyDefaultsIfNeeded(to destination: UserDefaults) {
     destination.synchronize()
 }
 
-func removeAllDefaults() {
-    if let domainName = defaultsConfiguration.persistentDomainName {
-        Defaults.removePersistentDomain(forName: domainName)
+private func resetDefaults(in destination: UserDefaults,
+                           domainName: String,
+                           sourceDomains: [String]) {
+    // Clear accessible migration sources too, so moving between fallback and
+    // shared stores after reset cannot bring back old preferences.
+    for sourceName in sourceDomains where sourceName != domainName {
+        guard let source = UserDefaults(suiteName: sourceName) else { continue }
+        for key in legacyPreferenceKeys {
+            source.removeObject(forKey: key)
+        }
+        source.set(currentDefaultsMigrationVersion, forKey: defaultsMigrationVersionKey)
+        source.synchronize()
     }
-    UserDefaults(suiteName: Constants.Id.LegacyGroup)?
-        .removePersistentDomain(forName: Constants.Id.LegacyGroup)
-    Defaults.set(currentDefaultsMigrationVersion,
-                 forKey: defaultsMigrationVersionKey)
-    Defaults.synchronize()
+    destination.removePersistentDomain(forName: domainName)
+    destination.set(currentDefaultsMigrationVersion,
+                    forKey: defaultsMigrationVersionKey)
+    destination.synchronize()
+}
+
+func removeAllDefaults() {
+    guard let domainName = defaultsConfiguration.persistentDomainName else { return }
+    let sources = Bundle.main.bundleIdentifier == Constants.Id.MainApp
+        ? migrationSourceDomains + [Constants.Id.Group] : []
+    resetDefaults(in: Defaults, domainName: domainName, sourceDomains: sources)
 }
 
 public class DefaultsKeys {
